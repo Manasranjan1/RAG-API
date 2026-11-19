@@ -1,54 +1,79 @@
-import {
-  extractPagesFromPDF,
-  summarisePages,
-} from "../services/ingestion.service.js";
+import { extractPagesFromPDF } from "../services/ingestion.service.js";
+import { chunkPages } from "../services/chunking.service.js";
+import { generateEmbeddings } from "../services/embedding.service.js";
 
 // ---------------------------------------------------------------------------
-// Document Controller — Phase 1
+// Document Controller — Phase 2
 //
-// Controllers handle the HTTP layer: reading the request, calling services,
-// and writing the response. They contain no business logic themselves.
+// The upload endpoint now runs the full pipeline synchronously:
+//   extract text → chunk → generate embeddings → return verification response.
 //
-// In Phase 1 we do not store anything in the database yet.
-// The upload endpoint extracts text and returns a summary immediately.
-// Database persistence and async processing come in Phase 3 and Phase 6.
+// No database storage yet — that comes in Phase 3.
+// Asynchronous ingestion (immediate response + background processing) comes
+// in Phase 6. For now, the endpoint waits for the entire pipeline to finish
+// before responding, which is fine for verification purposes.
 // ---------------------------------------------------------------------------
 
 /**
  * POST /api/documents/upload
  *
  * Accepts a PDF via multipart/form-data (field name: "file").
- * Extracts text and returns a page-by-page summary.
- *
- * multer has already written the file to uploads/ and populated req.file
- * by the time this handler runs.
+ * Runs the full ingestion pipeline and returns a verification summary.
  */
 export async function uploadDocument(req, res, next) {
   try {
-    // multer populates req.file when a file is present and passes validation.
-    // If no file was sent at all, req.file is undefined.
     if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded. Send a PDF in the 'file' field." });
+      return res
+        .status(400)
+        .json({ error: "No file uploaded. Send a PDF in the 'file' field." });
     }
 
     const { originalname, filename, size, path: filePath } = req.file;
 
-    // Extract text from the PDF — this is the core Phase 1 work.
+    // ── Step 1: Extract text from PDF (Phase 1) ──────────────────────────
     const pages = await extractPagesFromPDF(filePath);
-    const summary = summarisePages(pages);
 
+    // ── Step 2: Split pages into chunks (Phase 2) ─────────────────────────
+    const chunks = await chunkPages(pages);
+
+    // ── Step 3: Generate embedding vectors (Phase 2) ──────────────────────
+    // Extract just the text from each chunk to pass to the embedding model.
+    const chunkTexts = chunks.map((c) => c.pageContent);
+    const vectors = await generateEmbeddings(chunkTexts);
+
+    // ── Build verification response ───────────────────────────────────────
+    // We show enough detail to confirm the pipeline is working correctly
+    // without sending the full vectors (768 floats × N chunks = very large).
     return res.status(200).json({
-      message: "PDF uploaded and text extracted successfully.",
+      message: "PDF processed successfully. Ready for database storage (Phase 3).",
       document: {
         originalName: originalname,
         storedAs: filename,
         sizeBytes: size,
         sizeMB: (size / (1024 * 1024)).toFixed(2),
       },
-      extraction: summary,
+      pipeline: {
+        pages: pages.length,
+        chunks: chunks.length,
+        embeddingDimensions: vectors[0]?.length ?? 0,
+        chunkSize: parseInt(process.env.CHUNK_SIZE || "1000", 10),
+        chunkOverlap: parseInt(process.env.CHUNK_OVERLAP || "200", 10),
+      },
+      // Show a preview of each chunk so it's easy to inspect in Postman.
+      // pageNumber is the original source page, preserved through the splitter.
+      chunkPreviews: chunks.map((chunk, i) => ({
+        chunkIndex: i + 1,
+        pageNumber: chunk.metadata.pageNumber,
+        characterCount: chunk.pageContent.length,
+        excerpt:
+          chunk.pageContent.length > 150
+            ? chunk.pageContent.slice(0, 150) + "…"
+            : chunk.pageContent,
+        // Show first 6 dims so it's clear the vector is real but keep response small.
+        embeddingPreview: vectors[i]?.slice(0, 6).map((v) => parseFloat(v.toFixed(6))),
+      })),
     });
   } catch (err) {
-    // Pass unexpected errors to the global error handler (error.middleware.js).
     next(err);
   }
 }

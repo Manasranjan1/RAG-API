@@ -33,8 +33,11 @@ if (provider === "google") {
     throw new Error("GOOGLE_API_KEY is required when AI_PROVIDER=google");
   }
 
-  // text-embedding-004 produces 768-dimensional vectors.
-  // The database schema uses vector(768). Keep these in sync.
+  // gemini-embedding-001 is the current active Google embedding model.
+  // It supports Matryoshka Representation Learning (MRL), meaning we can
+  // truncate the output from its native 3072 dims down to 768 dims.
+  // We pin to 768 dims to keep the pgvector schema small and consistent.
+  // The database column must be declared as vector(768) to match this.
   chatModel = new ChatGoogleGenerativeAI({
     apiKey: process.env.GOOGLE_API_KEY,
     model: process.env.GOOGLE_CHAT_MODEL || "gemini-1.5-flash",
@@ -43,12 +46,16 @@ if (provider === "google") {
 
   embeddings = new GoogleGenerativeAIEmbeddings({
     apiKey: process.env.GOOGLE_API_KEY,
-    model: process.env.GOOGLE_EMBEDDING_MODEL || "text-embedding-004",
+    model: process.env.GOOGLE_EMBEDDING_MODEL || "gemini-embedding-001",
+    // Pin output to 768 dims. MRL lets gemini-embedding-001 truncate from 3072
+    // without meaningful quality loss at this dimension size.
+    // This value MUST match the vector(N) declaration in the database schema.
+    outputDimensionality: 768,
   });
 
   console.log(`AI Provider: Google Gemini`);
   console.log(`  Chat model:      ${process.env.GOOGLE_CHAT_MODEL || "gemini-1.5-flash"}`);
-  console.log(`  Embedding model: ${process.env.GOOGLE_EMBEDDING_MODEL || "text-embedding-004"} (768 dims)`);
+  console.log(`  Embedding model: ${process.env.GOOGLE_EMBEDDING_MODEL || "gemini-embedding-001"} (768 dims)`);
 } else if (provider === "openai") {
   const { ChatOpenAI } = await import("@langchain/openai");
   const { OpenAIEmbeddings } = await import("@langchain/openai");
