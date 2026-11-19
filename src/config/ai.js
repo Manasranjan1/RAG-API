@@ -40,7 +40,7 @@ if (provider === "google") {
   // The database column must be declared as vector(768) to match this.
   chatModel = new ChatGoogleGenerativeAI({
     apiKey: process.env.GOOGLE_API_KEY,
-    model: process.env.GOOGLE_CHAT_MODEL || "gemini-1.5-flash",
+    model: process.env.GOOGLE_CHAT_MODEL || "gemini-3-flash-preview",
     temperature: 0.2, // Lower temperature = more factual, less creative answers
   });
 
@@ -54,7 +54,7 @@ if (provider === "google") {
   });
 
   console.log(`AI Provider: Google Gemini`);
-  console.log(`  Chat model:      ${process.env.GOOGLE_CHAT_MODEL || "gemini-1.5-flash"}`);
+  console.log(`  Chat model:      ${process.env.GOOGLE_CHAT_MODEL || "gemini-3-flash-preview"}`);
   console.log(`  Embedding model: ${process.env.GOOGLE_EMBEDDING_MODEL || "gemini-embedding-001"} (768 dims)`);
 } else if (provider === "openai") {
   const { ChatOpenAI } = await import("@langchain/openai");
