@@ -1,0 +1,31 @@
+{
+  "name": "rag-api",
+  "version": "1.0.0",
+  "description": "Async Document Intelligence — RAG API using LangChain.js, Gemini, and pgvector",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "rag",
+    "langchain",
+    "gemini",
+    "pgvector",
+    "express"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/core": "^1.4.2",
+    "@langchain/google-genai": "^2.3.6",
+    "@langchain/openai": "^1.8.4",
+    "@langchain/textsplitters": "^1.0.2",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.23.1"
+  }
+}

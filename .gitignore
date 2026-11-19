@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Environment variables — never commit secrets
+.env
+
+# Uploaded PDF files — not committed to source control
+uploads/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+*.log
