@@ -1,26 +1,46 @@
 import { extractPagesFromPDF } from "../services/ingestion.service.js";
 import { chunkPages } from "../services/chunking.service.js";
 import { generateEmbeddings } from "../services/embedding.service.js";
+import {
+  createDocument,
+  updateDocumentStatus,
+  saveChunks,
+  getAllDocuments,
+  getDocumentById,
+} from "../services/document.service.js";
 
 // ---------------------------------------------------------------------------
-// Document Controller — Phase 2
+// Document Controller — Phase 3
 //
-// The upload endpoint now runs the full pipeline synchronously:
-//   extract text → chunk → generate embeddings → return verification response.
+// The upload flow now persists to PostgreSQL:
 //
-// No database storage yet — that comes in Phase 3.
-// Asynchronous ingestion (immediate response + background processing) comes
-// in Phase 6. For now, the endpoint waits for the entire pipeline to finish
-// before responding, which is fine for verification purposes.
+//   1. Create a document row (status: PENDING)
+//   2. Extract text from the PDF
+//   3. Chunk the text
+//   4. Generate embeddings
+//   5. Save all chunks + vectors to document_chunks
+//   6. Update document status to COMPLETED
+//   7. Return the document ID and status
+//
+// The flow is still synchronous in Phase 3 — the response is sent only after
+// the entire pipeline finishes. Async (background) ingestion comes in Phase 6.
+//
+// Error handling:
+//   If anything fails after the document row is created, we update the
+//   document status to FAILED with an error message, then re-throw so the
+//   global error handler can respond with a 500. This keeps the database
+//   consistent and lets the client call GET /api/documents/:id to see why
+//   processing failed.
 // ---------------------------------------------------------------------------
 
 /**
  * POST /api/documents/upload
- *
- * Accepts a PDF via multipart/form-data (field name: "file").
- * Runs the full ingestion pipeline and returns a verification summary.
  */
 export async function uploadDocument(req, res, next) {
+  // documentId is set as soon as we insert the row so we can update status
+  // to FAILED even if an error occurs mid-pipeline.
+  let documentId = null;
+
   try {
     if (!req.file) {
       return res
@@ -28,72 +48,86 @@ export async function uploadDocument(req, res, next) {
         .json({ error: "No file uploaded. Send a PDF in the 'file' field." });
     }
 
-    const { originalname, filename, size, path: filePath } = req.file;
+    const { originalname, path: filePath } = req.file;
 
-    // ── Step 1: Extract text from PDF (Phase 1) ──────────────────────────
+    // ── Step 1: Create document row (status: PENDING) ─────────────────────
+    const doc = await createDocument(originalname);
+    documentId = doc.id;
+
+    // ── Step 2: Mark as PROCESSING ────────────────────────────────────────
+    await updateDocumentStatus(documentId, { status: "PROCESSING" });
+
+    // ── Step 3: Extract text from PDF ─────────────────────────────────────
     const pages = await extractPagesFromPDF(filePath);
 
-    // ── Step 2: Split pages into chunks (Phase 2) ─────────────────────────
+    // ── Step 4: Chunk the text ────────────────────────────────────────────
     const chunks = await chunkPages(pages);
 
-    // ── Step 3: Generate embedding vectors (Phase 2) ──────────────────────
-    // Extract just the text from each chunk to pass to the embedding model.
+    // ── Step 5: Generate embeddings ───────────────────────────────────────
     const chunkTexts = chunks.map((c) => c.pageContent);
     const vectors = await generateEmbeddings(chunkTexts);
 
-    // ── Build verification response ───────────────────────────────────────
-    // We show enough detail to confirm the pipeline is working correctly
-    // without sending the full vectors (768 floats × N chunks = very large).
-    return res.status(200).json({
-      message: "PDF processed successfully. Ready for database storage (Phase 3).",
+    // ── Step 6: Save chunks + embeddings to database ──────────────────────
+    await saveChunks(documentId, chunks, vectors);
+
+    // ── Step 7: Mark as COMPLETED ─────────────────────────────────────────
+    const completed = await updateDocumentStatus(documentId, {
+      status: "COMPLETED",
+      totalChunks: chunks.length,
+    });
+
+    return res.status(201).json({
+      message: "Document uploaded and processed successfully.",
       document: {
-        originalName: originalname,
-        storedAs: filename,
-        sizeBytes: size,
-        sizeMB: (size / (1024 * 1024)).toFixed(2),
+        id: completed.id,
+        filename: completed.filename,
+        status: completed.status,
+        totalChunks: completed.total_chunks,
+        createdAt: completed.created_at,
       },
-      pipeline: {
-        pages: pages.length,
-        chunks: chunks.length,
-        embeddingDimensions: vectors[0]?.length ?? 0,
-        chunkSize: parseInt(process.env.CHUNK_SIZE || "1000", 10),
-        chunkOverlap: parseInt(process.env.CHUNK_OVERLAP || "200", 10),
-      },
-      // Show a preview of each chunk so it's easy to inspect in Postman.
-      // pageNumber is the original source page, preserved through the splitter.
-      chunkPreviews: chunks.map((chunk, i) => ({
-        chunkIndex: i + 1,
-        pageNumber: chunk.metadata.pageNumber,
-        characterCount: chunk.pageContent.length,
-        excerpt:
-          chunk.pageContent.length > 150
-            ? chunk.pageContent.slice(0, 150) + "…"
-            : chunk.pageContent,
-        // Show first 6 dims so it's clear the vector is real but keep response small.
-        embeddingPreview: vectors[i]?.slice(0, 6).map((v) => parseFloat(v.toFixed(6))),
-      })),
     });
   } catch (err) {
+    // If we already created a document row, mark it as FAILED so the client
+    // can inspect what went wrong via GET /api/documents/:id.
+    if (documentId) {
+      await updateDocumentStatus(documentId, {
+        status: "FAILED",
+        errorMessage: err.message,
+      }).catch(() => {}); // Ignore secondary DB errors during error handling
+    }
     next(err);
   }
 }
 
 /**
  * GET /api/documents
- *
- * Returns all uploaded documents.
- * Stub in Phase 1 — will be implemented once the database is in place (Phase 3).
+ * Lists all documents with their current status.
  */
-export async function listDocuments(req, res) {
-  res.status(501).json({ message: "Not implemented yet — coming in Phase 3" });
+export async function listDocuments(req, res, next) {
+  try {
+    const documents = await getAllDocuments();
+    return res.json({ documents });
+  } catch (err) {
+    next(err);
+  }
 }
 
 /**
  * GET /api/documents/:id
- *
  * Returns details for a single document.
- * Stub in Phase 1 — will be implemented once the database is in place (Phase 3).
  */
-export async function getDocument(req, res) {
-  res.status(501).json({ message: "Not implemented yet — coming in Phase 3" });
+export async function getDocument(req, res, next) {
+  try {
+    const doc = await getDocumentById(req.params.id);
+
+    if (!doc) {
+      return res
+        .status(404)
+        .json({ error: `Document with id "${req.params.id}" not found.` });
+    }
+
+    return res.json({ document: doc });
+  } catch (err) {
+    next(err);
+  }
 }
