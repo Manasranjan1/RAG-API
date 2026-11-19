@@ -1,44 +1,40 @@
 import fs from "fs/promises";
 import { PDFParse } from "pdf-parse";
+import { chunkPages } from "./chunking.service.js";
+import { generateEmbeddings } from "./embedding.service.js";
+import { updateDocumentStatus, saveChunks } from "./document.service.js";
 
 // ---------------------------------------------------------------------------
-// Ingestion Service — Phase 1
+// Ingestion Service — Asynchronous Ingestion (Phase 6)
 //
-// Responsible for extracting text from an uploaded PDF file.
+// Responsible for:
+//   1. Extracting text from uploaded PDF files page by page.
+//   2. Managing asynchronous background ingestion:
+//      - Transitions: PENDING -> PROCESSING -> COMPLETED | FAILED
+//      - Extracts text, splits into chunks, computes embeddings, and stores in DB
+//      - Tracks errors and updates database status accordingly
 //
-// Why PDFParse v2 (class-based API)?
-//   The installed version of pdf-parse is v2.x, which uses a class-based
-//   interface. `PDFParse.getText()` internally iterates every page and returns
-//   a structured object with a `pages` array — giving us page-level metadata
-//   without any extra work.
-//
-// In later phases, this service will be extended to also run chunking and
-// embedding. For now it only handles extraction.
+// In-Process Background Task Note:
+//   Ingestion runs asynchronously using Node.js event-loop scheduling (setImmediate).
+//   No external queue infrastructure (Redis, BullMQ) is needed for this portfolio MVP.
+//   Known limitation: background jobs running in-process are not durable across
+//   application restarts.
 // ---------------------------------------------------------------------------
 
 /**
  * Extracts text from a PDF file, returning an array of page objects.
  *
- * @param {string} filePath  - Absolute path to the uploaded PDF.
+ * @param {string} filePath - Absolute path to the uploaded PDF.
  * @returns {Promise<{ pageNumber: number, text: string }[]>}
- *
- * @throws If the file cannot be read or the PDF cannot be parsed.
  */
 export async function extractPagesFromPDF(filePath) {
   const buffer = await fs.readFile(filePath);
-
-  // PDFParse constructor accepts { data: Buffer } or { url: string }.
-  // We pass the buffer directly — no extra disk reads needed.
   const parser = new PDFParse({ data: buffer });
 
   let result;
   try {
-    // getText() processes every page and returns:
-    //   { total: number, pages: [{ num: number, text: string }, ...] }
     result = await parser.getText();
   } finally {
-    // destroy() releases the underlying PDF.js worker resources.
-    // Always call this — even if getText() throws — to avoid memory leaks.
     await parser.destroy();
   }
 
@@ -48,8 +44,6 @@ export async function extractPagesFromPDF(filePath) {
     );
   }
 
-  // Normalise into our own shape: { pageNumber, text }
-  // Filter out pages that are entirely blank (common in scanned PDFs).
   const pages = result.pages
     .map((p) => ({
       pageNumber: p.num,
@@ -67,23 +61,55 @@ export async function extractPagesFromPDF(filePath) {
 }
 
 /**
- * Returns a short summary of the extracted pages for API responses.
- * Keeps the response payload small — callers that need full text access
- * the `pages` array directly.
+ * Processes an uploaded document asynchronously in the background.
  *
- * @param {{ pageNumber: number, text: string }[]} pages
+ * Transitions status:
+ *   PENDING -> PROCESSING -> COMPLETED (or FAILED)
+ *
+ * @param {string} documentId - UUID of the document in PostgreSQL.
+ * @param {string} filePath - Absolute path to the uploaded file.
  */
-export function summarisePages(pages) {
-  const totalCharacters = pages.reduce((sum, p) => sum + p.text.length, 0);
+export async function processDocumentAsync(documentId, filePath) {
+  console.log(`[Ingestion] Starting background processing for document: ${documentId}`);
 
-  return {
-    totalPages: pages.length,
-    totalCharacters,
-    // Show a short excerpt from each page so the user can confirm extraction worked.
-    pages: pages.map((p) => ({
-      pageNumber: p.pageNumber,
-      characterCount: p.text.length,
-      excerpt: p.text.length > 200 ? p.text.slice(0, 200) + "…" : p.text,
-    })),
-  };
+  try {
+    // 1. Mark as PROCESSING
+    await updateDocumentStatus(documentId, { status: "PROCESSING" });
+
+    // 2. Extract text from PDF
+    const pages = await extractPagesFromPDF(filePath);
+    console.log(`[Ingestion] Extracted ${pages.length} pages for document: ${documentId}`);
+
+    // 3. Chunk the text
+    const chunks = await chunkPages(pages);
+    console.log(`[Ingestion] Generated ${chunks.length} chunks for document: ${documentId}`);
+
+    // 4. Generate embeddings
+    const chunkTexts = chunks.map((c) => c.pageContent);
+    const vectors = await generateEmbeddings(chunkTexts);
+    console.log(`[Ingestion] Computed embeddings for document: ${documentId}`);
+
+    // 5. Save chunks and embeddings into PostgreSQL
+    await saveChunks(documentId, chunks, vectors);
+
+    // 6. Mark as COMPLETED
+    await updateDocumentStatus(documentId, {
+      status: "COMPLETED",
+      totalChunks: chunks.length,
+    });
+
+    console.log(`[Ingestion] Successfully completed ingestion for document: ${documentId}`);
+  } catch (err) {
+    console.error(`[Ingestion Error] Failed processing document ${documentId}:`, err.message);
+
+    // Record failure in the database with error message
+    try {
+      await updateDocumentStatus(documentId, {
+        status: "FAILED",
+        errorMessage: err.message,
+      });
+    } catch (dbErr) {
+      console.error(`[Ingestion Error] Failed to update FAILED status in database:`, dbErr.message);
+    }
+  }
 }

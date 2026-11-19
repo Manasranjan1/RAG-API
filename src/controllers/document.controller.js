@@ -1,46 +1,29 @@
-import { extractPagesFromPDF } from "../services/ingestion.service.js";
-import { chunkPages } from "../services/chunking.service.js";
-import { generateEmbeddings } from "../services/embedding.service.js";
+import { processDocumentAsync } from "../services/ingestion.service.js";
 import {
   createDocument,
-  updateDocumentStatus,
-  saveChunks,
   getAllDocuments,
   getDocumentById,
 } from "../services/document.service.js";
 
 // ---------------------------------------------------------------------------
-// Document Controller — Phase 3
+// Document Controller — Asynchronous Ingestion (Phase 6)
 //
-// The upload flow now persists to PostgreSQL:
+// The upload endpoint now responds immediately:
+//   1. Inserts document record with status 'PENDING'.
+//   2. Dispatches asynchronous background processing (extract -> chunk -> embed -> store).
+//   3. Returns HTTP 202 Accepted without keeping the client waiting.
 //
-//   1. Create a document row (status: PENDING)
-//   2. Extract text from the PDF
-//   3. Chunk the text
-//   4. Generate embeddings
-//   5. Save all chunks + vectors to document_chunks
-//   6. Update document status to COMPLETED
-//   7. Return the document ID and status
-//
-// The flow is still synchronous in Phase 3 — the response is sent only after
-// the entire pipeline finishes. Async (background) ingestion comes in Phase 6.
-//
-// Error handling:
-//   If anything fails after the document row is created, we update the
-//   document status to FAILED with an error message, then re-throw so the
-//   global error handler can respond with a 500. This keeps the database
-//   consistent and lets the client call GET /api/documents/:id to see why
-//   processing failed.
+// Clients can poll GET /api/documents/:id to observe status transitions:
+//   PENDING -> PROCESSING -> COMPLETED | FAILED
 // ---------------------------------------------------------------------------
 
 /**
  * POST /api/documents/upload
+ *
+ * Accepts a PDF via multipart/form-data (field name: "file").
+ * Creates a document entry and starts background ingestion asynchronously.
  */
 export async function uploadDocument(req, res, next) {
-  // documentId is set as soon as we insert the row so we can update status
-  // to FAILED even if an error occurs mid-pipeline.
-  let documentId = null;
-
   try {
     if (!req.file) {
       return res
@@ -50,58 +33,33 @@ export async function uploadDocument(req, res, next) {
 
     const { originalname, path: filePath } = req.file;
 
-    // ── Step 1: Create document row (status: PENDING) ─────────────────────
+    // 1. Create document record with status PENDING
     const doc = await createDocument(originalname);
-    documentId = doc.id;
 
-    // ── Step 2: Mark as PROCESSING ────────────────────────────────────────
-    await updateDocumentStatus(documentId, { status: "PROCESSING" });
-
-    // ── Step 3: Extract text from PDF ─────────────────────────────────────
-    const pages = await extractPagesFromPDF(filePath);
-
-    // ── Step 4: Chunk the text ────────────────────────────────────────────
-    const chunks = await chunkPages(pages);
-
-    // ── Step 5: Generate embeddings ───────────────────────────────────────
-    const chunkTexts = chunks.map((c) => c.pageContent);
-    const vectors = await generateEmbeddings(chunkTexts);
-
-    // ── Step 6: Save chunks + embeddings to database ──────────────────────
-    await saveChunks(documentId, chunks, vectors);
-
-    // ── Step 7: Mark as COMPLETED ─────────────────────────────────────────
-    const completed = await updateDocumentStatus(documentId, {
-      status: "COMPLETED",
-      totalChunks: chunks.length,
+    // 2. Dispatch background processing asynchronously using setImmediate
+    // This allows the response to be sent immediately while processing continues
+    setImmediate(() => {
+      processDocumentAsync(doc.id, filePath);
     });
 
-    return res.status(201).json({
-      message: "Document uploaded and processed successfully.",
+    // 3. Return 202 Accepted with document metadata
+    return res.status(202).json({
+      message: "Document uploaded successfully. Processing started.",
       document: {
-        id: completed.id,
-        filename: completed.filename,
-        status: completed.status,
-        totalChunks: completed.total_chunks,
-        createdAt: completed.created_at,
+        id: doc.id,
+        filename: doc.filename,
+        status: doc.status,
+        createdAt: doc.created_at,
       },
     });
   } catch (err) {
-    // If we already created a document row, mark it as FAILED so the client
-    // can inspect what went wrong via GET /api/documents/:id.
-    if (documentId) {
-      await updateDocumentStatus(documentId, {
-        status: "FAILED",
-        errorMessage: err.message,
-      }).catch(() => {}); // Ignore secondary DB errors during error handling
-    }
     next(err);
   }
 }
 
 /**
  * GET /api/documents
- * Lists all documents with their current status.
+ * Lists all documents and their ingestion statuses.
  */
 export async function listDocuments(req, res, next) {
   try {
@@ -114,7 +72,7 @@ export async function listDocuments(req, res, next) {
 
 /**
  * GET /api/documents/:id
- * Returns details for a single document.
+ * Returns details and ingestion status for a single document.
  */
 export async function getDocument(req, res, next) {
   try {
