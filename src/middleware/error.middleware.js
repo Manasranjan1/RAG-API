@@ -1,3 +1,5 @@
+import multer from "multer";
+
 // Global error-handling middleware.
 //
 // Express identifies error-handling middleware by the four-argument signature
@@ -10,6 +12,18 @@ const errorMiddleware = (err, req, res, next) => {
   console.error(`[Error] ${err.message}`);
   if (process.env.NODE_ENV !== "production") {
     console.error(err.stack);
+  }
+
+  // multer throws its own error types with specific codes.
+  // We translate those into user-friendly 400 messages here so we don't
+  // need any special handling in each route.
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res
+        .status(400)
+        .json({ error: "File too large. Maximum allowed size is 10 MB." });
+    }
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
   }
 
   const statusCode = err.statusCode || err.status || 500;
