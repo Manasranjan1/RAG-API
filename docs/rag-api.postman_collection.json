@@ -1,0 +1,101 @@
+{
+  "info": {
+    "_postman_id": "c1f7b889-4b62-4299-8cf0-rag-api-collection",
+    "name": "Async Document Intelligence (RAG API)",
+    "description": "Postman Collection for testing all endpoints of the Async Document Intelligence RAG API.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "2. Upload PDF Document (Async)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/documents/upload",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "documents", "upload"]
+        }
+      }
+    },
+    {
+      "name": "3. List Documents",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/documents",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "documents"]
+        }
+      }
+    },
+    {
+      "name": "4. Get Document Status & Details",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/documents/{{documentId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "documents", "{{documentId}}"]
+        }
+      }
+    },
+    {
+      "name": "5. Ask Question (RAG Q&A)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"documentId\": \"{{documentId}}\",\n  \"question\": \"What is the main objective of this document?\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "ask"]
+        }
+      }
+    }
+  ]
+}

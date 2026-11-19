@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "setup-db": "node src/scripts/setup-db.mjs"
+    "setup-db": "node src/scripts/setup-db.mjs",
+    "test": "node --test tests/api.test.mjs"
   },
   "keywords": [
     "rag",
