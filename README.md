@@ -414,4 +414,4 @@ npm test
 
 ## 9. License
 
-ISC License. Built for portfolio demonstration and technical interviews.
+ISC License. Built by Manas Ranjan.
